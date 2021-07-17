@@ -10,12 +10,12 @@ Variables:
 
 Variables for scheduled pipelines:
 Repository Sync:
-	Interval Pattern: Custom ( 0 0 * * * )
-	Cron Timezone: Moscow
-	Target Branch: master
-	Variables: CRON_SYNC: yes
+   - Interval Pattern: Custom ( 0 0 * * * )
+   - Cron Timezone: Moscow
+   - Target Branch: master
+   - Variables: CRON_SYNC: yes
 Check uncommited changes:
-    Interval Pattern: Custom ( 0 9-19 * * 1-5 )
-	Cron Timezone: Moscow
-	Target Branch: master
-	Variables: CRON_CHECK: yes
+   - Interval Pattern: Custom ( 0 9-19 * * 1-5 )
+   - Cron Timezone: Moscow
+   - Target Branch: master
+   - Variables: CRON_CHECK: yes
