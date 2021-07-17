@@ -14,6 +14,7 @@ Repository Sync:
    - Cron Timezone: Moscow
    - Target Branch: master
    - Variables: CRON_SYNC: yes
+
 Check uncommited changes:
    - Interval Pattern: Custom ( 0 9-19 * * 1-5 )
    - Cron Timezone: Moscow
