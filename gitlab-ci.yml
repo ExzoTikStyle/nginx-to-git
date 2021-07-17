@@ -1,0 +1,153 @@
+stages:
+  - check_diff
+  - test
+  - sync-repository
+  - deploy
+
+.tests:
+  stage: test
+  image: <registry>/nginx-check:1.16.1
+  tags: [nginx-test]
+  allow_failure: false
+  only:
+    refs:
+      - master
+  except:
+    refs:
+      - schedules
+
+.common_before_test_part: &common_before_test_part
+    - mkdir -p /root/.ssh
+    - eval $(ssh-agent -s)
+    - echo $SSH_KEY | base64 -d > /root/.ssh/key.priv && chmod =600 /root/.ssh/key.priv
+    - ssh-add /root/.ssh/key.priv <<< $KEYPASS
+.common_test_part: &common_test_part
+    - rm -rf /etc/nginx/*
+    - cp -r /builds/devops/nginx/$CI_PROJECT_NAME/* /etc/nginx/
+    - rsync -e "ssh -o StrictHostKeyChecking=no" -chavzP --stats ${SSH_USER}@${CI_PROJECT_NAME}:/etc/nginx/conf.d/ /etc/nginx/conf.d 2>&1 >/dev/null || echo "/etc/nginx/conf.d does not exist"
+    - find /etc/nginx -type f -exec sed -i 's/access_log/#access_log/g' {} +
+    - find /etc/nginx -type f -exec sed -i 's/error_log/#error_log/g' {} +
+    - find /etc/nginx -type f -exec sed -i 's/\t/    /g' {} +
+    - find /etc/nginx -type f -exec sed -i -e 's/ \+/ /g' {} +
+    - find /etc/nginx -type f -exec sed -i -e 's/listen 192\.17\.[0-9]\{1,3\}\.[0-9]\{1,3\}:/listen /g' {} +
+    - find /etc/nginx -type f -exec sed -i -e 's/server_name 192\.17\.[0-9]\{1,3\}\.[0-9]\{1,3\}/server_name 127.0.0.1/g' {} +
+    - find /etc/nginx -type f -exec sed -i 's/listen [::]:80/#listen [::]:80/g' {} +
+    - nginx -t -q
+
+.common_part: &common_part
+  image: <registry>/ubuntu:20.04
+  tags: [nginx-test]
+  before_script:
+    - 'which ssh-agent || ( apt-get update -qq -y && DEBIAN_FRONTEND=noninteractive apt-get install dnsutils curl openssh-client -qq -y < /dev/null > /dev/null )'
+    - mkdir -p /root/.ssh
+    - eval $(ssh-agent -s)
+    - echo $SSH_KEY | base64 -d > /root/.ssh/key.priv && chmod =600 /root/.ssh/key.priv
+    - ssh-add /root/.ssh/key.priv <<< $KEYPASS
+    - export TZ="Europe/Moscow" && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+    
+.common_tobackup_part: &common_tobackup_part |-
+      export tobackup=$(ssh -o StrictHostKeyChecking=no ${SSH_USER}@${CI_PROJECT_NAME} "cd /etc/nginx && git status --porcelain | sed s/^...//")
+.common_iftobackup_part: &common_iftobackup_part |-
+        if [ ! -z "$tobackup" ];
+        then
+          ssh -o StrictHostKeyChecking=no ${SSH_USER}@${CI_PROJECT_NAME} 'cd /etc/nginx && sudo rm -f /etc/nginx/tmp.log && export tobackup=$(git status --porcelain | sed s/^...//) && sudo touch /etc/nginx/tmp.log && sudo chmod 777 /etc/nginx/tmp.log && for file in ${tobackup[@]}; do export newname=$(echo $file-$(date +"%Y%m%d%H%M%S")); export foldervar=$(sudo dirname $file); if [ $foldervar != '.' ]; then sudo mkdir _Backup/$foldervar; fi; sudo cp -R $file _Backup/$newname; sudo echo $newname >> tmp.log; done'
+          export backupfiles=$(ssh -o StrictHostKeyChecking=no ${SSH_USER}@${CI_PROJECT_NAME} "cat /etc/nginx/tmp.log")
+        fi
+
+check-diff:
+  stage: check_diff
+  <<: *common_part
+  script:
+    - export changes=$(ssh -o StrictHostKeyChecking=no ${SSH_USER}@${CI_PROJECT_NAME} "cd /etc/nginx && sudo git diff --name-only")
+    - export untracked=$(ssh -o StrictHostKeyChecking=no ${SSH_USER}@${CI_PROJECT_NAME} "cd /etc/nginx && sudo git ls-files . --exclude-standard --others")
+    - |
+      if [ ! -z "$changes" ] && [ ! -z "$untracked" ]; 
+      then
+        changes=$(echo $changes | tr " " "\n" | awk '$0="/etc/nginx/"$0') && untracked=$(echo $untracked | tr " " "\n" | awk '$0="/etc/nginx/"$0')
+        echo -e "Uncommited changes on $CI_PROJECT_NAME\nUncommited files:\n$changes\nUntracked files:\n$untracked"
+        head_message="Uncommited changes on"
+        button_text="For undo changes follow and run pipeline"
+        body_message="\nUncommited files:\n$changes\nUntracked files:\n$untracked"
+        curl -s -d '{"chat_id":'"$TG_CHAT_ID"', "text":"'"$head_message"' '"$CI_PROJECT_NAME"' ('"$(dig +short $CI_PROJECT_NAME @192.17.127.200 | grep '^[.0-9]*$'))"''"$body_message"'\nTrigger time: '"$(date +%H:%M:%S)"'", "reply_markup": {"inline_keyboard": [[{"text":"'"$button_text"'", "url": "http://git/devops/nginx/'"$CI_PROJECT_NAME"'/pipelines/'"$CI_PIPELINE_ID"'"}]]} }' -H "Content-Type: application/json" -X POST https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage > /dev/null
+      elif [ -z "$changes" ] && [ ! -z "$untracked" ];
+      then
+        untracked=$(echo $untracked | tr " " "\n" | awk '$0="/etc/nginx/"$0')
+        echo -e "Untracked files on $CI_PROJECT_NAME\nUntracked files:\n$untracked"
+        head_message="Uncommited changes on"
+        button_text="For undo changes follow and run pipeline"
+        body_message="\nUntracked files:\n$untracked"
+        curl -s -d '{"chat_id":'"$TG_CHAT_ID"', "text":"'"$head_message"' '"$CI_PROJECT_NAME"' ('"$(dig +short $CI_PROJECT_NAME @192.17.127.200 | grep '^[.0-9]*$'))"''"$body_message"'\nTrigger time: '"$(date +%H:%M:%S)"'", "reply_markup": {"inline_keyboard": [[{"text":"'"$button_text"'", "url": "http://git/devops/nginx/'"$CI_PROJECT_NAME"'/pipelines/'"$CI_PIPELINE_ID"'"}]]} }' -H "Content-Type: application/json" -X POST https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage > /dev/null
+      elif [ ! -z "$changes" ] && [ -z "$untracked" ];
+      then
+        changes=$(echo $changes | tr " " "\n" | awk '$0="/etc/nginx/"$0')
+        echo -e "Uncommited changes on $CI_PROJECT_NAME\nUncommited files:\n$changes"
+         head_message="Uncommited changes on"
+         button_text="For undo changes follow and run pipeline"
+         body_message="\nUncommited files:\n$changes"
+         curl -s -d '{"chat_id":'"$TG_CHAT_ID"', "text":"'"$head_message"' '"$CI_PROJECT_NAME"' ('"$(dig +short $CI_PROJECT_NAME @192.17.127.200 | grep '^[.0-9]*$'))"''"$body_message"'\nTrigger time: '"$(date +%H:%M:%S)"'", "reply_markup": {"inline_keyboard": [[{"text":"'"$button_text"'", "url": "http://git/devops/nginx/'"$CI_PROJECT_NAME"'/pipelines/'"$CI_PIPELINE_ID"'"}]]} }' -H "Content-Type: application/json" -X POST https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage > /dev/null
+      elif [ -z "$changes" ] && [ -z "$untracked" ];
+      then
+        echo "Uncommited changes not found"
+      fi
+  only:
+    refs:
+      - master
+    variables:
+      - $CI_PIPELINE_SOURCE == "schedule" && $CRON_CHECK == "yes"
+
+test-configs:
+  extends: .tests
+  script:
+    - *common_before_test_part
+    - *common_test_part
+
+deploy-configs:
+  stage: deploy
+  <<: *common_part
+  script:
+    - *common_tobackup_part
+    - *common_iftobackup_part
+    - |
+      if [ ! -z "$backupfiles" ]; 
+      then
+        backupfiles=$(echo $backupfiles | tr " " "\n" | awk '$0="/etc/nginx/_Backup/"$0')
+        echo -e "Deploy config to $CI_PROJECT_NAME \nBackup files:\n$backupfiles"
+      fi
+    - |
+      if ssh -o StrictHostKeyChecking=no ${SSH_USER}@${CI_PROJECT_NAME} "cd /etc/nginx && sudo git reset --hard origin/master && sudo git clean -f && sudo git fetch && sudo git pull && sudo nginx -s reload"; 
+      then
+         echo "Deploy Success"
+      else 
+         head_message="\u26D4\u26D4\u26D4\nNginx reload failed on"
+         button_text="View failed pipeline"
+         curl -s -d '{"chat_id":'"$TG_CHAT_ID"', "text":"'"$head_message"' '"$CI_PROJECT_NAME"' ('"$(dig +short $CI_PROJECT_NAME @192.17.127.200 | grep '^[.0-9]*$'))"''"$body_message"'\nTrigger time: '"$(date +%H:%M:%S)"'", "reply_markup": {"inline_keyboard": [[{"text":"'"$button_text"'", "url": "http://git/devops/nginx/'"$CI_PROJECT_NAME"'/pipelines/'"$CI_PIPELINE_ID"'"}]]} }' -H "Content-Type: application/json" -X POST https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage > /dev/null && exit 1
+      fi
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: manual
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "master"'
+      when: on_success
+    - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == "master"'
+      when: manual
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $CRON_SYNC == "yes"'
+      when: never
+
+sync-repository:
+  stage: sync-repository
+  <<: *common_part
+  script:
+    - *common_tobackup_part
+    - *common_iftobackup_part
+    - |
+      if [ ! -z "$backupfiles" ]; 
+      then
+        backupfiles=$(echo $backupfiles | tr " " "\n" | awk '$0="/etc/nginx/_Backup/"$0')
+        echo -e "Repository sync on $CI_PROJECT_NAME \nBackup files:\n$backupfiles"
+        curl -s -d '{"chat_id":'"$TG_CHAT_ID"', "text":"Repository sync on '"$CI_PROJECT_NAME"' ('"$(dig +short $CI_PROJECT_NAME @192.17.127.200 | grep '^[.0-9]*$'))"'\nBackup files:\n'"$backupfiles"'\nTrigger time: '"$(date +%H:%M:%S)"'"}' -H "Content-Type: application/json" -X POST https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage > /dev/null
+        ssh -o StrictHostKeyChecking=no ${SSH_USER}@${CI_PROJECT_NAME} "cd /etc/nginx && sudo git reset --hard origin/master && sudo git clean -f && sudo git fetch && sudo git pull && sudo nginx -s reload"
+      fi
+  only:
+    refs:
+      - master
+    variables:
+      - $CI_PIPELINE_SOURCE == "schedule" && $CRON_SYNC == "yes"
