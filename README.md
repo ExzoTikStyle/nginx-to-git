@@ -9,6 +9,7 @@ Variables:
 - TG_CHAT_ID - id of tg chat
 
 Variables for scheduled pipelines:
+
 Repository Sync:
    - Interval Pattern: Custom ( 0 0 * * * )
    - Cron Timezone: Moscow
